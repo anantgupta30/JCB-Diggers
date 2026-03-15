@@ -67,28 +67,35 @@ def prune_graph(adj, seeds, hops):
     If hops is None (unlimited), do full BFS.
     """
     reachable = set(seeds)
-    frontier = list(seeds)
+    queue = deque(seeds)
+    if not queue or hops == 0:
+        return {}, reachable
+
+    pruned_adj = defaultdict(list)
+    adj_get = adj.get
+    queue_append = queue.append
+    queue_popleft = queue.popleft
+    reachable_add = reachable.add
+    empty = ()
     depth = 0
-    while frontier:
-        if hops is not None and depth >= hops:
-            break
-        next_frontier = []
-        for u in frontier:
-            for v, p in adj.get(u, []):
+
+    while queue and (hops is None or depth < hops):
+        level_count = len(queue)
+        while level_count:
+            u = queue_popleft()
+            level_count -= 1
+            nbrs = adj_get(u, empty)
+            if not nbrs:
+                continue
+            pruned_nbrs = pruned_adj[u]
+            for v, p in nbrs:
+                pruned_nbrs.append((v, p))
                 if v not in reachable:
-                    reachable.add(v)
-                    next_frontier.append(v)
-        frontier = next_frontier
+                    reachable_add(v)
+                    queue_append(v)
         depth += 1
 
-    # Build pruned adjacency — only edges where BOTH endpoints are reachable
-    pruned_adj = {}
-    for u in reachable:
-        if u in adj:
-            nbrs = [(v, p) for v, p in adj[u] if v in reachable]
-            if nbrs:
-                pruned_adj[u] = nbrs
-    return pruned_adj, reachable
+    return dict(pruned_adj), reachable
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -108,10 +115,11 @@ def sample_live_edge_graphs(adj, r, rng):
             all_edges.append((u, v, p))
 
     subgraphs = []
+    rand = rng.random
     for _ in range(r):
         g = defaultdict(list)
         for u, v, p in all_edges:
-            if rng.random() < p:
+            if rand() < p:
                 g[u].append(v)
         subgraphs.append(dict(g))
     return subgraphs
@@ -127,19 +135,28 @@ def bfs_reachable(adj_graph, seeds, hops=None):
     hops=None means unlimited.
     """
     reached = set(seeds)
-    frontier = list(seeds)
+    queue = deque(seeds)
+    if not queue or hops == 0:
+        return reached
+
+    adj_get = adj_graph.get
+    queue_append = queue.append
+    queue_popleft = queue.popleft
+    reached_add = reached.add
+    empty = ()
     depth = 0
-    while frontier:
-        if hops is not None and depth >= hops:
-            break
-        next_frontier = []
-        for u in frontier:
-            for v in adj_graph.get(u, []):
+
+    while queue and (hops is None or depth < hops):
+        level_count = len(queue)
+        while level_count:
+            u = queue_popleft()
+            level_count -= 1
+            for v in adj_get(u, empty):
                 if v not in reached:
-                    reached.add(v)
-                    next_frontier.append(v)
-        frontier = next_frontier
+                    reached_add(v)
+                    queue_append(v)
         depth += 1
+
     return reached
 
 
@@ -149,21 +166,36 @@ def bfs_reachable_without_edge(adj_graph, seeds, block_u, block_v, hops=None):
     Returns the set of reachable nodes.
     """
     reached = set(seeds)
-    frontier = list(seeds)
+    queue = deque(seeds)
+    if not queue or hops == 0:
+        return reached
+
+    adj_get = adj_graph.get
+    queue_append = queue.append
+    queue_popleft = queue.popleft
+    reached_add = reached.add
+    empty = ()
     depth = 0
-    while frontier:
-        if hops is not None and depth >= hops:
-            break
-        next_frontier = []
-        for u in frontier:
-            for v in adj_graph.get(u, []):
-                if v not in reached:
-                    if u == block_u and v == block_v:
+
+    while queue and (hops is None or depth < hops):
+        level_count = len(queue)
+        while level_count:
+            u = queue_popleft()
+            level_count -= 1
+            nbrs = adj_get(u, empty)
+            if u == block_u:
+                for v in nbrs:
+                    if v == block_v or v in reached:
                         continue
-                    reached.add(v)
-                    next_frontier.append(v)
-        frontier = next_frontier
+                    reached_add(v)
+                    queue_append(v)
+                continue
+            for v in nbrs:
+                if v not in reached:
+                    reached_add(v)
+                    queue_append(v)
         depth += 1
+
     return reached
 
 
@@ -201,20 +233,80 @@ def get_candidate_edges(subgraphs, baselines, seeds):
 # 6. Greedy selection with lazy evaluation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def compute_marginal_gain(edge, subgraphs, baselines, seeds, hops, relevant_indices):
+def compute_marginal_gain(edge, subgraphs, baseline_sizes, seeds, hops, relevant_indices, sample_count):
     """
     Compute the average marginal gain of blocking `edge` across relevant subgraphs.
     Only considers subgraphs where the edge is live and reachable.
     """
     u, v = edge
     total_gain = 0
-    r = len(subgraphs)
     for i in relevant_indices:
-        base_size = len(baselines[i])
-        new_reached = bfs_reachable_without_edge(subgraphs[i], seeds, u, v, hops)
-        gain = base_size - len(new_reached)
-        total_gain += gain
-    return total_gain / r
+        total_gain += baseline_sizes[i] - len(
+            bfs_reachable_without_edge(subgraphs[i], seeds, u, v, hops)
+        )
+    return total_gain / sample_count
+
+
+def get_one_hop_sources(adj, seeds):
+    one_hop = set()
+    adj_get = adj.get
+    one_hop_add = one_hop.add
+    empty = ()
+    for seed in seeds:
+        for v, _ in adj_get(seed, empty):
+            if v not in seeds:
+                one_hop_add(v)
+    return one_hop
+
+
+def extend_with_source_priority(selected, selected_set, k, adjs, source_set):
+    for graph_adj in adjs:
+        for u, nbrs in graph_adj.items():
+            if u not in source_set:
+                continue
+            for v, _ in nbrs:
+                edge = (u, v)
+                if edge in selected_set:
+                    continue
+                selected.append(edge)
+                selected_set.add(edge)
+                if len(selected) >= k:
+                    return
+
+
+def extend_with_remaining_edges(selected, selected_set, k, adjs):
+    for graph_adj in adjs:
+        for u, nbrs in graph_adj.items():
+            for v, _ in nbrs:
+                edge = (u, v)
+                if edge in selected_set:
+                    continue
+                selected.append(edge)
+                selected_set.add(edge)
+                if len(selected) >= k:
+                    return
+
+
+def smart_pad_selected(selected, k, primary_adj, seeds, fallback_adj=None):
+    if len(selected) >= k:
+        return selected
+
+    selected_set = set(selected)
+    adjs = [primary_adj]
+    if fallback_adj is not None and fallback_adj is not primary_adj:
+        adjs.append(fallback_adj)
+
+    one_hop_sources = set()
+    for graph_adj in adjs:
+        one_hop_sources.update(get_one_hop_sources(graph_adj, seeds))
+
+    extend_with_source_priority(selected, selected_set, k, adjs, seeds)
+    if len(selected) < k:
+        extend_with_source_priority(selected, selected_set, k, adjs, one_hop_sources)
+    if len(selected) < k:
+        extend_with_remaining_edges(selected, selected_set, k, adjs)
+
+    return selected
 
 
 def greedy_select(adj, seeds, k, r, hops, rng):
@@ -226,8 +318,9 @@ def greedy_select(adj, seeds, k, r, hops, rng):
 
     print(f"  Computing baseline reachability...", file=sys.stderr, flush=True)
     baselines = compute_baseline_reachable(subgraphs, seeds, hops)
+    baseline_sizes = [len(reached) for reached in baselines]
 
-    avg_baseline = sum(len(b) for b in baselines) / r
+    avg_baseline = sum(baseline_sizes) / r
     print(f"  Avg baseline spread: {avg_baseline:.2f}", file=sys.stderr, flush=True)
 
     print(f"  Building candidate edge set...", file=sys.stderr, flush=True)
@@ -267,7 +360,9 @@ def greedy_select(adj, seeds, k, r, hops, rng):
         for edge, indices in eval_candidates.items():
             if not indices:
                 continue
-            gain = compute_marginal_gain(edge, subgraphs, baselines, seeds, hops, indices)
+            gain = compute_marginal_gain(
+                edge, subgraphs, baseline_sizes, seeds, hops, indices, r
+            )
             if gain > best_gain:
                 best_gain = gain
                 best_edge = edge
@@ -303,6 +398,7 @@ def greedy_select(adj, seeds, k, r, hops, rng):
         # Recompute baselines only for affected subgraphs
         for i in affected_indices:
             baselines[i] = bfs_reachable(subgraphs[i], seeds, hops)
+            baseline_sizes[i] = len(baselines[i])
 
         # Rebuild candidate indices for affected subgraphs
         # Remove stale indices and add new ones
@@ -322,15 +418,6 @@ def greedy_select(adj, seeds, k, r, hops, rng):
 
         for edge in edges_to_remove:
             del candidates[edge]
-
-    # If we selected fewer than k edges, pad with remaining candidates
-    if len(selected) < k and candidates:
-        remaining = sorted(candidates.keys(), key=lambda e: len(candidates[e]), reverse=True)
-        for edge in remaining:
-            if len(selected) >= k:
-                break
-            if edge not in selected:
-                selected.append(edge)
 
     return selected
 
@@ -374,32 +461,8 @@ def main():
           file=sys.stderr, flush=True)
     selected = greedy_select(pruned_adj, seeds, k, r, hops, rng)
 
-    # Ensure exactly k edges in output
-    # If we have fewer than k, pad with dummy edges from the edge set
     if len(selected) < k:
-        # Pick remaining edges from the pruned graph that aren't already selected
-        selected_set = set(selected)
-        for u, nbrs in pruned_adj.items():
-            if len(selected) >= k:
-                break
-            for v, p in nbrs:
-                if (u, v) not in selected_set:
-                    selected.append((u, v))
-                    selected_set.add((u, v))
-                    if len(selected) >= k:
-                        break
-    # If still not enough (unlikely), pad from original graph
-    if len(selected) < k:
-        selected_set = set(selected)
-        for u, nbrs in adj.items():
-            if len(selected) >= k:
-                break
-            for v, p in nbrs:
-                if (u, v) not in selected_set:
-                    selected.append((u, v))
-                    selected_set.add((u, v))
-                    if len(selected) >= k:
-                        break
+        selected = smart_pad_selected(selected, k, pruned_adj, seeds, fallback_adj=adj)
 
     selected = selected[:k]
     write_output(output_file, selected)
