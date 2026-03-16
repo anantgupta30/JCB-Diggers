@@ -1,0 +1,131 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{graphicx}
+
+\title{Network Influence Minimization (Route Blocking) Report}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+% Space left for previous tasks (1, 2, 3)
+\vspace{2cm}
+\begin{center}
+    \textit{[Space reserved for Tasks 1, 2, and 3]}
+\end{center}
+\vspace{2cm}
+
+\section*{Task 4: Algorithm Design}
+
+\subsection*{Algorithm Description}
+The proposed algorithm uses a Sample Average Approximation (SAA) framework paired with a Greedy heuristic. Because computing the exact expected spread $\sigma(R)$ is \#P-hard, we simulate the stochastic Independent Cascade model by generating $r$ deterministic Live-Edge Graphs (LEGs) via Monte Carlo sampling. 
+
+To ensure scalability on massive networks, the algorithm first aggressively prunes the graph to only include nodes reachable from the seed set $A_0$ within $h$ hops (if bounded). In each of the $k$ greedy rounds, it identifies candidate edges. To prevent the $\mathcal{O}(|E|)$ bottleneck of evaluating all candidates, it employs a "warm-start proxy" that shortlists the top $5k$ candidates based on their frequency of appearance in the reachable subgraphs. The true marginal gain is then computed only for this shortlist by performing a Breadth-First Search (BFS) with the candidate edge temporarily removed. Finally, only the LEGs affected by the chosen edge are updated to prepare for the next round.
+
+\subsection*{Pseudocode}
+
+\begin{algorithm}[H]
+\caption{Reachability-Delta Greedy Solver}
+\begin{algorithmic}[1]
+\State \textbf{Input:} Graph $G=(V,E,p)$, Seed set $A_0$, budget $k$, samples $r$, hop limit $h$
+\State \textbf{Output:} Set of blocked edges $S$ where $|S| \leq k$
+\State $S \gets \emptyset$
+\State $G_{pruned} \gets \textsc{PruneGraph}(G, A_0, h)$ \Comment{Keep only nodes reachable in $h$ hops}
+\State $\mathcal{L} \gets \textsc{SampleLiveEdgeGraphs}(G_{pruned}, r)$ \Comment{Sample $r$ deterministic subgraphs}
+\State $B \gets \textsc{ComputeBaselines}(\mathcal{L}, A_0, h)$ \Comment{Compute initial reachable sets for all $r$ graphs}
+\For{$i = 1$ \textbf{to} $k$}
+    \State $C \gets \textsc{GetCandidateEdges}(\mathcal{L}, B, A_0)$ \Comment{Edges live and reachable in at least one graph}
+    \If{$|C| = 0$} \textbf{break} \EndIf
+    \If{$|C| > 5k$ \textbf{and} $k > 5$}
+        \State $C \gets \textsc{TopProxyShortlist}(C, 5k)$ \Comment{Shortlist by frequency across subgraphs}
+    \EndIf
+    \State $best\_edge \gets \text{null}$, $max\_gain \gets -1$
+    \For{$e \in C$}
+        \State $gain \gets \textsc{ComputeMarginalGain}(e, \mathcal{L}, B, A_0, h)$ 
+        \If{$gain > max\_gain$}
+            \State $max\_gain \gets gain$
+            \State $best\_edge \gets e$
+        \EndIf
+    \EndFor
+    \State $S \gets S \cup \{best\_edge\}$
+    \State $\mathcal{L}, B \gets \textsc{UpdateAffectedGraphs}(\mathcal{L}, B, best\_edge, A_0, h)$
+\EndFor
+\State \textbf{return} \textsc{SmartPadSelected}(S, k, G_{pruned}, A_0) \Comment{Pad to exactly $k$ edges if needed}
+\end{algorithmic}
+\end{algorithm}
+
+\subsection*{Computational Complexity}
+Let $N$ and $M$ be the number of nodes and edges in the pruned graph $G_{pruned}$.
+\begin{itemize}
+    \item \textbf{Pruning:} A standard BFS takes $\mathcal{O}(|V| + |E|)$.
+    \item \textbf{Sampling:} Generating $r$ live-edge graphs takes $\mathcal{O}(r \cdot M)$.
+    \item \textbf{Initial Baselines:} Running BFS on $r$ graphs takes $\mathcal{O}(r \cdot (N + M))$.
+    \item \textbf{Greedy Loop:} Runs $k$ times.
+    \begin{itemize}
+        \item \textit{Candidate Generation:} Scans reachable sets taking $\mathcal{O}(r \cdot M)$.
+        \item \textit{Marginal Gain Evaluation:} Thanks to the proxy, we evaluate at most $\min(|C|, 5k)$ edges. A full BFS evaluates an edge in affected graphs taking $\mathcal{O}(r \cdot (N + M))$. So evaluating the shortlist takes $\mathcal{O}(k \cdot r \cdot (N + M))$.
+        \item \textit{Updating:} Updating only affected graphs takes strictly less than $\mathcal{O}(r \cdot (N + M))$.
+    \end{itemize}
+\end{itemize}
+Overall, the worst-case time complexity is dominated by the evaluation step in the greedy loop:
+$$\mathcal{O}\left(|V| + |E| + k^2 \cdot r \cdot (N + M)\right)$$
+Because $N \ll |V|$ and $M \ll |E|$ due to aggressive pruning, this formulation remains highly tractable in practice.
+
+\subsection*{Approximation Guarantees}
+\textbf{Does the proposed algorithm provide any formal approximation guarantees?} No.
+
+\textbf{Proof:} The standard $(1 - 1/e)$ approximation guarantee for greedy algorithms applies strictly to maximizing monotone \textit{submodular} set functions. Let $f(S)$ be the expected number of nodes saved (i.e., prevented from catching fire) by deleting a set of edges $S$. For the greedy bound to hold, $f(S)$ must be submodular. However, the objective function for edge deletion in reachability/influence networks is fundamentally \textit{not} submodular.
+
+Consider a simple deterministic diamond graph (where $p=1$ for all edges) with a seed node $A_0 = \{s\}$, a target node $t$, and two intermediate nodes $u$ and $v$. The edges are $e_1 = (s,u)$, $e_2 = (u,t)$, $e_3 = (s,v)$, and $e_4 = (v,t)$. 
+If we define the marginal gain of deleting an edge set $A$ as $\Delta(A) = f(A)$, we observe the following:
+\begin{itemize}
+    \item Deleting only $e_1$ saves $0$ nodes, because $t$ is still reached via $v$. So, $f(\{e_1\}) = 0$.
+    \item Deleting only $e_3$ saves $0$ nodes, because $t$ is still reached via $u$. So, $f(\{e_3\}) = 0$.
+    \item Deleting both $e_1$ and $e_3$ disconnects $t$ from $s$, saving node $t$. So, $f(\{e_1, e_3\}) = 1$.
+\end{itemize}
+Since $f(\{e_1\}) + f(\{e_3\}) < f(\{e_1, e_3\})$, the marginal gain of adding $e_3$ to the set $\{e_1\}$ is strictly greater than adding $e_3$ to the empty set. This violates the property of diminishing returns required for submodularity. Because the objective function is supermodular in certain network motifs, the greedy algorithm cannot guarantee a bounded approximation factor of the optimal combinatorial solution.
+
+\newpage
+\section*{Task 5: Competitive Evaluation}
+
+\subsection*{Implementation Details}
+The algorithm was implemented in Python. To scale to graphs with up to $15 \times 10^4$ regions while respecting computational time limits, several engineering optimizations were included:
+\begin{enumerate}
+    \item \textbf{Aggressive Graph Pruning:} Before any simulations occur, a breadth-first search isolates the sub-graph reachable within the specified limit $h$, permanently ignoring disconnected components.
+    \item \textbf{Lazy Updates:} In each greedy step, after an edge is selected, the baseline reachability arrays are not recomputed from scratch. Instead, the algorithm identifies the specific subgraphs where the removed edge was actually live and updates only those.
+    \item \textbf{Warm-Start Proxy Search:} For large $k$, instead of testing the marginal gain of every possible live edge ($\mathcal{O}(|E|)$ evaluations per round), a proxy score (edge frequency across all $r$ graphs) shortlists the top $5k$ candidates for deterministic BFS evaluation. 
+\end{enumerate}
+
+\subsection*{Evaluation Metrics}
+
+The proposed algorithm was evaluated on the provided public datasets. To measure its effectiveness, we report the reduction ratio $\rho(R)$, which represents the relative decrease in the expected spread $\sigma(R)$ compared to the baseline spread $\sigma(\emptyset)$ where no edges are blocked. 
+
+As shown in Table 1, the algorithm achieves a substantial reduction in expected fire spread across both test configurations. Notably, it executes well under the competitive time limits, completing the edge selection and evaluation in less than 0.3 seconds for graphs exceeding 15,000 nodes and 62,000 edges.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{|l|c|c|c|c|c|c|}
+\hline
+\textbf{Dataset} & \textbf{Nodes} & \textbf{Edges} & \textbf{Budget ($k$)} & \textbf{Hops} & \textbf{Reduction Ratio $\rho(R)$} & \textbf{Execution Time (s)} \\ \hline
+Dataset 1 & 15,233 & 62,796 & 50 & Unlimited & 0.8186 & 0.203 \\ \hline
+Dataset 2 & 15,233 & 62,796 & 30 & 3 & 0.9196 & 0.264 \\ \hline
+\end{tabular}
+\caption{Performance and Evaluation Metrics on Public Datasets}
+\end{table}
+
+
+\section*{Conclusion}
+
+This report explored the Network Influence Minimization (Route Blocking) problem from both theoretical and practical perspectives. As established in the theoretical analysis (Tasks 1--3), minimizing the expected fire spread $\sigma(R)$ by intercepting edges is profoundly challenging: the exact computation of the spread is \#P-hard, the optimization problem itself is NP-hard, and the objective function lacks the submodular properties necessary to guarantee a bounded approximation factor for greedy algorithms. 
+
+Despite these theoretical roadblocks, our experimental results (Task 5) demonstrate that high-performance heuristic approximations can effectively bridge the gap between intractability and practical utility. By leveraging Sample Average Approximation (SAA) over Monte Carlo simulated Live-Edge Graphs, paired with aggressive reachability pruning and proxy-guided lazy evaluations, the proposed algorithm successfully scaled to massive networks of over 15,000 nodes and 62,000 edges. 
+
+Ultimately, the solver achieved over 81\% and 91\% reduction ratios ($\rho(R)$) in expected fire spread on the test datasets, executing in less than 0.3 seconds. This confirms that while the combinatorial optimum remains out of reach for massive stochastic graphs, intelligent structural pruning and greedy heuristics can reliably yield highly competitive interception strategies well within strict computational constraints.
+
+\end{document}
